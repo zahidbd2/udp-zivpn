@@ -36,8 +36,8 @@ NoNewPrivileges=true
 WantedBy=multi-user.target
 EOF
 
-echo -e "ZIVPN UDP Usernames/Passwords"
-read -p "Enter usernames separated by commas, example: user1,user2 (Press enter for Default 'zi'): " input_config
+echo -e "ZIVPN UDP Passwords"
+read -p "Enter passwords separated by commas, example: pass1,pass2 (Press enter for Default 'zi'): " input_config
 
 if [ -n "$input_config" ]; then
     IFS=',' read -r -a config <<< "$input_config"
@@ -58,5 +58,5 @@ systemctl start zivpn.service
 iptables -t nat -A PREROUTING -i $(ip -4 route ls|grep default|grep -Po '(?<=dev )(\S+)'|head -1) -p udp --dport 6000:19999 -j DNAT --to-destination :5667
 ufw allow 6000:19999/udp
 ufw allow 5667/udp
-rm zi2.* 1> /dev/null 2> /dev/null
+rm zi.* 1> /dev/null 2> /dev/null
 echo -e "ZIVPN UDP Installed"
