@@ -6,5 +6,6 @@
    "auth": {
     "mode": "passwords", 
     "config": ["zi"]
-  }
+  }done
+  
 }
