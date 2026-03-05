@@ -1183,7 +1183,7 @@ const checkRateLimit = (username) => {
 const executeZivpnManager = (command, args, res) => {
     execFile('sudo', [ZIVPN_MANAGER_SCRIPT, command, ...args], (error, stdout, stderr) => {
         if (error) {
-            const errorMessage = stderr.includes('Error:') ? stderr : 'An internal server error occurred.';
+            const errorMessage = (stderr && typeof stderr === 'string' && stderr.includes('Error:')) ? stderr : 'An internal server error occurred.';
             return res.status(500).json({ status: 'error', message: errorMessage.trim() });
         }
         if (stdout.toLowerCase().includes('success')) {
@@ -1230,7 +1230,7 @@ EOF
 
     # 3. Install npm dependencies
     echo "Installing API dependencies..."
-    npm install --prefix /etc/zivpn/api
+    (cd /etc/zivpn/api && npm install)
     
     # 4. Create and enable systemd service
     cat <<'EOF' > /etc/systemd/system/zivpn-api.service
