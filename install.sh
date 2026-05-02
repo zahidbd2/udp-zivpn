@@ -12,7 +12,7 @@ LIGHT_GREEN='\033[1;32m'
 NC='\033[0m' # No Color
 
 # --- License Info ---
-LICENSE_URL="https://raw.githubusercontent.com/kedaivpn/izin/main/licence"
+LICENSE_URL="https://licence-manager-nu.vercel.app/api/check"
 LICENSE_INFO_FILE="/etc/zivpn/.license_info"
 
 # --- Pre-flight Checks ---
@@ -24,6 +24,13 @@ fi
 # --- License Verification Function ---
 function verify_license() {
     echo "Verifying installation license..."
+
+    if ! command -v jq &> /dev/null || ! command -v curl &> /dev/null; then
+        echo "Installing required packages for verification..."
+        apt-get update -y > /dev/null 2>&1
+        apt-get install -y jq curl > /dev/null 2>&1
+    fi
+
     local SERVER_IP
     SERVER_IP=$(get_public_ip)
     if [ -z "$SERVER_IP" ]; then
@@ -32,24 +39,26 @@ function verify_license() {
     fi
 
     local license_data
-    license_data=$(curl -s "$LICENSE_URL")
+    license_data=$(curl -s "${LICENSE_URL}?ip=${SERVER_IP}")
     if [ $? -ne 0 ] || [ -z "$license_data" ]; then
         echo -e "${RED}Gagal terhubung ke server lisensi. Mohon periksa koneksi internet Anda.${NC}"
         exit 1
     fi
 
-    local license_entry
-    license_entry=$(echo "$license_data" | grep -w "$SERVER_IP")
+    local valid
+    valid=$(echo "$license_data" | jq -r '.valid')
 
-    if [ -z "$license_entry" ]; then
-        echo -e "${RED}Verifikasi Lisensi Gagal! IP Anda tidak terdaftar. IP: ${SERVER_IP}${NC}"
+    if [ "$valid" != "true" ]; then
+        local message
+        message=$(echo "$license_data" | jq -r '.message // "IP Anda tidak terdaftar atau dibanned."')
+        echo -e "${RED}Verifikasi Lisensi Gagal! ${message} IP: ${SERVER_IP}${NC}"
         exit 1
     fi
 
     local client_name
     local expiry_date_str
-    client_name=$(echo "$license_entry" | awk '{print $1}')
-    expiry_date_str=$(echo "$license_entry" | awk '{print $2}')
+    client_name=$(echo "$license_data" | jq -r '.client_name')
+    expiry_date_str=$(echo "$license_data" | jq -r '.expired_date')
 
     local expiry_timestamp
     expiry_timestamp=$(date -d "$expiry_date_str" +%s)
@@ -935,7 +944,7 @@ EOF
 # This script is run by a cron job to periodically check the license status.
 
 # --- Configuration ---
-LICENSE_URL="https://raw.githubusercontent.com/kedaivpn/izin/main/licence"
+LICENSE_URL="https://licence-manager-nu.vercel.app/api/check"
 LICENSE_INFO_FILE="/etc/zivpn/.license_info"
 EXPIRED_LOCK_FILE="/etc/zivpn/.expired"
 TELEGRAM_CONF="/etc/zivpn/telegram.conf"
@@ -1030,30 +1039,31 @@ fi
 source "$LICENSE_INFO_FILE" # This loads CLIENT_NAME and EXPIRY_DATE
 
 # 3. Fetch Remote License Data
-license_data=$(curl -s "$LICENSE_URL")
+license_data=$(curl -s "${LICENSE_URL}?ip=${SERVER_IP}")
 if [ $? -ne 0 ] || [ -z "$license_data" ]; then
     log "Error: Failed to connect to license server. Exiting."
     exit 1
 fi
 
 # 4. Check License Status from Remote
-license_entry=$(echo "$license_data" | grep -w "$SERVER_IP")
+valid=$(echo "$license_data" | jq -r '.valid')
 
-if [ -z "$license_entry" ]; then
-    # IP not found in remote list (Revoked)
+if [ "$valid" != "true" ]; then
+    # IP not found in remote list (Revoked / Banned)
+    msg=$(echo "$license_data" | jq -r '.message // "IP Anda tidak terdaftar atau dibanned."')
     if [ ! -f "$EXPIRED_LOCK_FILE" ]; then
-        log "License for IP ${SERVER_IP} has been REVOKED."
+        log "License for IP ${SERVER_IP} is INVALID/REVOKED: ${msg}"
         systemctl stop zivpn.service
         touch "$EXPIRED_LOCK_FILE"
-        local MSG="Notifikasi Otomatis: Lisensi untuk Klien \`${CLIENT_NAME}\` dengan IP \`${SERVER_IP}\` telah dicabut (REVOKED). Layanan zivpn telah dihentikan."
+        MSG="Notifikasi Otomatis: Lisensi untuk Klien \`${CLIENT_NAME}\` dengan IP \`${SERVER_IP}\` telah dicabut/tidak valid (${msg}). Layanan zivpn telah dihentikan."
         send_telegram_message "$MSG"
     fi
     exit 0
 fi
 
-# 5. IP Found, Check for Expiry or Renewal
-client_name_remote=$(echo "$license_entry" | awk '{print $1}')
-expiry_date_remote=$(echo "$license_entry" | awk '{print $2}')
+# 5. License Valid, Check for Expiry or Renewal
+client_name_remote=$(echo "$license_data" | jq -r '.client_name')
+expiry_date_remote=$(echo "$license_data" | jq -r '.expired_date')
 expiry_timestamp_remote=$(date -d "$expiry_date_remote" +%s)
 current_timestamp=$(date +%s)
 
@@ -1146,12 +1156,16 @@ EOF
 
     cat <<'EOF' > /etc/zivpn/api/api.js
 const express = require('express');
-const { execFile } = require('child_process');
+const { execFile, exec } = require('child_process');
 const fs = require('fs');
 const app = express();
 const PORT = 5888;
 const AUTH_KEY_PATH = '/etc/zivpn/api_auth.key';
 const ZIVPN_MANAGER_SCRIPT = '/usr/local/bin/zivpn-manager';
+const LICENSE_INFO_FILE = '/etc/zivpn/.license_info';
+const EXPIRED_LOCK_FILE = '/etc/zivpn/.expired';
+
+app.use(express.json());
 
 const authenticate = (req, res, next) => {
     const providedAuthKey = req.query.auth;
@@ -1223,6 +1237,37 @@ app.all('/trial/zivpn', (req, res) => {
     const { exp } = req.query;
     if (!exp) return res.status(400).json({ status: 'error', message: 'Parameter exp is required.' });
     executeZivpnManager('trial_account', [exp], res);
+});
+
+app.post('/callback/licence', (req, res) => {
+    const { action, client_name, expired_date, status } = req.body;
+
+    if (!action || !client_name || !expired_date || !status) {
+        return res.status(400).json({ status: 'error', message: 'Invalid payload.' });
+    }
+
+    const expiryTimestamp = new Date(expired_date).getTime() / 1000;
+    const currentTimestamp = Math.floor(Date.now() / 1000);
+    const isExpired = expiryTimestamp <= currentTimestamp;
+
+    if (action === 'delete' || status === 'banned' || isExpired) {
+        exec('systemctl stop zivpn.service && touch ' + EXPIRED_LOCK_FILE, (error, stdout, stderr) => {
+            if (error) return res.status(500).json({ status: 'error', message: 'Failed to stop service.' });
+            res.json({ status: 'success', message: 'License revoked and service stopped.' });
+        });
+    } else if (action === 'update' && status === 'active' && !isExpired) {
+        const licenseInfoContent = `CLIENT_NAME='${client_name.replace(/'/g, "'\\''")}'\nEXPIRY_DATE='${expired_date.replace(/'/g, "'\\''")}'\n`;
+        fs.writeFile(LICENSE_INFO_FILE, licenseInfoContent, (err) => {
+            if (err) return res.status(500).json({ status: 'error', message: 'Failed to update license info.' });
+
+            exec('rm -f ' + EXPIRED_LOCK_FILE + ' && systemctl start zivpn.service', (error, stdout, stderr) => {
+                if (error) return res.status(500).json({ status: 'error', message: 'Failed to start service.' });
+                res.json({ status: 'success', message: 'License updated and service started.' });
+            });
+        });
+    } else {
+        res.status(400).json({ status: 'error', message: 'Action not handled based on conditions.' });
+    }
 });
 
 app.listen(PORT, () => console.log('ZIVPN API server running on port ' + PORT));
