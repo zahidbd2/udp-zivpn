@@ -323,10 +323,37 @@ app.post('/callback/licence', (req, res) => {
 app.listen(PORT, () => console.log('ZIVPN API server running on port ' + PORT));
 EOF
 
+# 5. Apply persistence fixes for sysctl and iptables
+echo "Applying persistence fixes for sysctl and iptables..."
+cat <<EOF > /etc/sysctl.d/zivpn.conf
+net.core.rmem_max=16777216
+net.core.wmem_max=16777216
+EOF
+sysctl -p /etc/sysctl.d/zivpn.conf > /dev/null 2>&1
+
+CORE_IFACE=$(ip -4 route ls | grep default | grep -Po '(?<=dev )(\S+)' | head -1)
+if [ -n "$CORE_IFACE" ] && [ -f /etc/systemd/system/zivpn.service ]; then
+    # Remove existing ExecStartPre/Post related to iptables just in case to prevent duplicates
+    sed -i '/ExecStartPre=-\/sbin\/iptables/d' /etc/systemd/system/zivpn.service
+    sed -i '/ExecStartPost=\/sbin\/iptables/d' /etc/systemd/system/zivpn.service
+    sed -i '/ExecStopPost=-\/sbin\/iptables/d' /etc/systemd/system/zivpn.service
+
+    # Insert the new rules around ExecStart
+    sed -i "/ExecStart=\/usr\/local\/bin\/zivpn/i ExecStartPre=-/sbin/iptables -t nat -D PREROUTING -i ${CORE_IFACE} -p udp --dport 6000:19999 -j DNAT --to-destination :5667" /etc/systemd/system/zivpn.service
+    sed -i "/ExecStart=\/usr\/local\/bin\/zivpn/a ExecStartPost=/sbin/iptables -t nat -A PREROUTING -i ${CORE_IFACE} -p udp --dport 6000:19999 -j DNAT --to-destination :5667\nExecStopPost=-/sbin/iptables -t nat -D PREROUTING -i ${CORE_IFACE} -p udp --dport 6000:19999 -j DNAT --to-destination :5667" /etc/systemd/system/zivpn.service
+
+    # Ensure current iptables are clean and set (if service is already running)
+    iptables -t nat -D PREROUTING -i "${CORE_IFACE}" -p udp --dport 6000:19999 -j DNAT --to-destination :5667 > /dev/null 2>&1 || true
+    iptables -t nat -A PREROUTING -i "${CORE_IFACE}" -p udp --dport 6000:19999 -j DNAT --to-destination :5667 > /dev/null 2>&1 || true
+fi
+
 # Restart services
 echo "Restarting services..."
 systemctl daemon-reload
 systemctl restart zivpn-api.service
+if systemctl is-active --quiet zivpn.service; then
+    systemctl restart zivpn.service
+fi
 
 echo "--- Update Complete ---"
-echo "License verification has been migrated to Vercel API."
+echo "License verification has been migrated to Vercel API, and persistence fixes applied."
