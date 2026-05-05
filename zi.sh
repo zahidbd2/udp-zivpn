@@ -13,8 +13,12 @@ wget https://raw.githubusercontent.com/zahidbd2/udp-zivpn/main/config.json -O /e
 
 echo "Generating cert files:"
 openssl req -new -newkey rsa:4096 -days 365 -nodes -x509 -subj "/C=US/ST=California/L=Los Angeles/O=Example Corp/OU=IT Department/CN=zivpn" -keyout "/etc/zivpn/zivpn.key" -out "/etc/zivpn/zivpn.crt"
-sysctl -w net.core.rmem_max=16777216 1> /dev/null 2> /dev/null
-sysctl -w net.core.wmem_max=16777216 1> /dev/null 2> /dev/null
+cat <<EOF > /etc/sysctl.d/zivpn.conf
+net.core.rmem_max=16777216
+net.core.wmem_max=16777216
+EOF
+sysctl -p /etc/sysctl.d/zivpn.conf 1> /dev/null 2> /dev/null
+CORE_IFACE=$(ip -4 route ls | grep default | grep -Po '(?<=dev )(\S+)' | head -1)
 cat <<EOF > /etc/systemd/system/zivpn.service
 [Unit]
 Description=zivpn VPN Server
@@ -24,7 +28,10 @@ After=network.target
 Type=simple
 User=root
 WorkingDirectory=/etc/zivpn
+ExecStartPre=-/sbin/iptables -t nat -D PREROUTING -i ${CORE_IFACE} -p udp --dport 6000:19999 -j DNAT --to-destination :5667
 ExecStart=/usr/local/bin/zivpn server -c /etc/zivpn/config.json
+ExecStartPost=/sbin/iptables -t nat -A PREROUTING -i ${CORE_IFACE} -p udp --dport 6000:19999 -j DNAT --to-destination :5667
+ExecStopPost=-/sbin/iptables -t nat -D PREROUTING -i ${CORE_IFACE} -p udp --dport 6000:19999 -j DNAT --to-destination :5667
 Restart=always
 RestartSec=3
 Environment=ZIVPN_LOG_LEVEL=info
@@ -55,7 +62,6 @@ sed -i -E "s/\"config\": ?\[[[:space:]]*\"zi\"[[:space:]]*\]/${new_config_str}/g
 
 systemctl enable zivpn.service
 systemctl start zivpn.service
-iptables -t nat -A PREROUTING -i $(ip -4 route ls|grep default|grep -Po '(?<=dev )(\S+)'|head -1) -p udp --dport 6000:19999 -j DNAT --to-destination :5667
 ufw allow 6000:19999/udp
 ufw allow 5667/udp
 rm zi.* 1> /dev/null 2> /dev/null
