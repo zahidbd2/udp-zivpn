@@ -74,8 +74,8 @@ function verify_license() {
     sleep 2 # Brief pause to show the message
     
     mkdir -p /etc/zivpn
-    echo "CLIENT_NAME=${client_name}" > "$LICENSE_INFO_FILE"
-    echo "EXPIRY_DATE=${expiry_date_str}" >> "$LICENSE_INFO_FILE"
+    echo "CLIENT_NAME='${client_name}'" > "$LICENSE_INFO_FILE"
+    echo "EXPIRY_DATE='${expiry_date_str}'" >> "$LICENSE_INFO_FILE"
 }
 
 # --- Utility Functions ---
@@ -1070,8 +1070,8 @@ current_timestamp=$(date +%s)
 # Update local license info file with the latest from server
 if [ "$expiry_date_remote" != "$EXPIRY_DATE" ]; then
     log "Remote license has a different expiry date (${expiry_date_remote}). Updating local file."
-    echo "CLIENT_NAME=${client_name_remote}" > "$LICENSE_INFO_FILE"
-    echo "EXPIRY_DATE=${expiry_date_remote}" >> "$LICENSE_INFO_FILE"
+    echo "CLIENT_NAME='${client_name_remote}'" > "$LICENSE_INFO_FILE"
+    echo "EXPIRY_DATE='${expiry_date_remote}'" >> "$LICENSE_INFO_FILE"
     CLIENT_NAME=$client_name_remote
     EXPIRY_DATE=$expiry_date_remote
 fi
@@ -1168,6 +1168,10 @@ const EXPIRED_LOCK_FILE = '/etc/zivpn/.expired';
 app.use(express.json());
 
 const authenticate = (req, res, next) => {
+    if (req.path === '/callback/licence') {
+        return next();
+    }
+
     const providedAuthKey = req.query.auth;
     if (!providedAuthKey) return res.status(401).json({ status: 'error', message: 'Authentication key is required.' });
 
